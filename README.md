@@ -6,7 +6,8 @@ This project is in its MVP stage and currently supports:
 
 - ✅ File upload for `.mp3`, `.wav`, and `.pdf`
 - ✅ Temporary saving of uploaded files
-- 🚧 (Coming soon) Automatic transcription and summarization
+- ✅ Automatic transcription
+- 🚧 (Coming soon) Automatic summarization
 - 🚧 (Coming soon) Flashcard generation and chatbot support
 
 ---
