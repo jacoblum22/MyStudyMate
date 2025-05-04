@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Output files (auto-generated transcripts, etc.)
+outputs/
+
 # C extensions
 *.so
 
