@@ -290,8 +290,12 @@ if uploaded_file is not None:
     with col1:
         st.text_area("", current_text, height=300)
     with col2:
-        with open(st.session_state.transcript_path, "rb") as f:
-            st.download_button(download_label, f, file_name=st.session_state.transcript_filename)
+        download_path = st.session_state.get("transcript_path") or st.session_state.get("pdf_text_path")
+        download_name = st.session_state.get("transcript_filename") or st.session_state.get("pdf_text_filename")
+
+        if download_path and download_name:
+            with open(download_path, "rb") as f:
+                st.download_button(download_label, f, file_name=download_name)
 
         current_file_key = os.path.splitext(uploaded_file.name)[0]
         summary_already_generated = (
