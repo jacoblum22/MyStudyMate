@@ -13,6 +13,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 import threading
 import time
 
+st.set_page_config(page_title="MyStudyMate", layout="wide")
+
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
@@ -24,11 +26,11 @@ os.makedirs(output_dir, exist_ok=True)
 temp_chunks_dir = "temp_chunks"
 os.makedirs(temp_chunks_dir, exist_ok=True)
 
-def estimate_gpt4o_cost(text, model="gpt-4o", max_output_tokens=1800):
+def estimate_gpt4o_cost(text, model="gpt-4o", max_output_tokens=900):
     encoding = tiktoken.encoding_for_model(model)
     input_tokens = len(encoding.encode(text))
-    input_rate = 0.005 / 1000
-    output_rate = 0.02 / 1000
+    input_rate = 5.00 / 1000000
+    output_rate = 20.00 / 1000000
     cost = (input_tokens * input_rate) + (max_output_tokens * output_rate)
     return input_tokens, max_output_tokens, cost
 
@@ -49,13 +51,14 @@ def transcribe_audio_in_chunks(audio_path, model_size="tiny.en", chunk_ms=30_000
     completed_chunks = 0
     lock = threading.Lock()
 
-    chunk_paths = []
-    for i in range(total_chunks):
-        start = i * chunk_ms
-        chunk = audio[start:start + chunk_ms]
-        chunk_filename = os.path.join(temp_chunks_dir, f"chunk_{i}.mp3")
-        chunk.export(chunk_filename, format="mp3")
-        chunk_paths.append((i, chunk_filename))
+    with st.spinner("Creating audio chunks..."):
+        chunk_paths = []
+        for i in range(total_chunks):
+            start = i * chunk_ms
+            chunk = audio[start:start + chunk_ms]
+            chunk_filename = os.path.join(temp_chunks_dir, f"chunk_{i}.mp3")
+            chunk.export(chunk_filename, format="mp3")
+            chunk_paths.append((i, chunk_filename))
 
     transcript_chunks = [None] * total_chunks
     failed_chunks = []
@@ -93,14 +96,14 @@ def transcribe_audio_in_chunks(audio_path, model_size="tiny.en", chunk_ms=30_000
 
     # Serial retry for failed chunks
     if failed_chunks:
-        status_text.write("Retrying failed chunks serially...")
-        fallback_model = whisper.load_model(model_size)
-        for idx, path in failed_chunks:
-            try:
-                result = fallback_model.transcribe(path)
-                transcript_chunks[idx] = result["text"]
-            except Exception:
-                transcript_chunks[idx] = ""
+        with st.spinner("Retrying failed chunks serially..."):
+            status_text.write("Retrying failed chunks serially...")
+            for idx, path in failed_chunks:
+                try:
+                    result = model.transcribe(path)
+                    transcript_chunks[idx] = result["text"]
+                except Exception:
+                    transcript_chunks[idx] = ""
 
     shutil.rmtree(temp_chunks_dir, ignore_errors=True)
     status_text.write("✅ Transcription complete.")
@@ -111,14 +114,24 @@ def transcribe_audio_in_chunks(audio_path, model_size="tiny.en", chunk_ms=30_000
 def generate_summary_and_glossary(input_text):
     prompt = (
         "You are a helpful academic assistant. A student has uploaded a transcript or textbook passage from a university lecture.\n\n"
-        "**Your task has two parts:**\n\n"
-        "1. Write a detailed and well-organized summary of the lecture in **hierarchical bullet-point format**, like a student might take in class. \n"
-        "Use **main points**, then nest **sub-points**, and **sub-sub-points** where needed (using indented bullets). \n"
-        "Capture not just key topics, but also examples, supporting ideas, and transitions. Think like you're building a study guide. \n"
-        "Use Markdown for clarity, including headers or bolded section titles if useful.\n\n"
-        "2. Then, write a **Glossary of Key Terms** as a separate section. For each term, provide a clear 1–2 sentence definition.\n\n"
-        "Be thorough and explanatory, and use Markdown formatting throughout to keep it clean and readable.\n\n"
-        f"{input_text[:12500]}"
+        "**Your task has two clear parts:**\n\n"
+        "### Part 1: Lecture Summary\n"
+        "Write a structured and detailed summary of the lecture in **hierarchical bullet-point format**, like high-quality class notes. Follow this format exactly:\n"
+        "- Start with a heading: `## Lecture Summary`\n"
+        "- Use `-` for main points\n"
+        "  - Use indented `-` for sub-points\n"
+        "    - Use double-indented `-` for sub-sub-points (if needed)\n"
+        "- Feel free to use numbered lists where necessary as well"
+        "- Do NOT use horizontal rules or other styles\n"
+        "- Organize ideas clearly and chronologically\n"
+        "- Include explanations, transitions, and examples when possible\n\n"
+        "### Part 2: Glossary\n"
+        "Then, create a glossary of key terms. Follow this format exactly:\n"
+        "- Start with a heading: `## Glossary of Key Terms`\n"
+        "- For each term, bold the term and follow with a colon and a 1–2 sentence definition, like this:\n"
+        "  - **Term**: Definition goes here.\n\n"
+        "Format the entire output using clean, readable Markdown. No unnecessary sections, headings, or decoration.\n\n"
+        f"{input_text[:50000]}"
     )
     response = client.chat.completions.create(
         model="gpt-4o",
@@ -142,31 +155,6 @@ def run_summary_generation(source_text, filename_prefix):
         f.write(summary_md)
     st.session_state.summary_filename = summary_filename
     st.session_state.summary_path = summary_path
-
-def display_summary_controls(uploaded_file_name, source_text):
-    current_file_key = os.path.splitext(uploaded_file_name)[0]
-    summary_already_generated = (
-        st.session_state.get("summary_md") and
-        st.session_state.get("last_summarized_file") == current_file_key and
-        st.session_state.get("summary_path") and
-        os.path.exists(st.session_state.get("summary_path"))
-    )
-    if not summary_already_generated:
-        est_input, est_output, est_cost = estimate_gpt4o_cost(source_text)
-        button_label = f"✨ Generate Summary and Glossary (est. ${est_cost:.2f}, {est_input} in / {est_output} out tokens)"
-        if st.button(button_label, key="generate_button"):
-            with st.spinner("Summarizing with GPT-4o..."):
-                run_summary_generation(source_text, current_file_key)
-    if summary_already_generated:
-        st.markdown(st.session_state.summary_md)
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            with open(st.session_state.summary_path, "rb") as f:
-                st.download_button("📄 Download Markdown", f, file_name=st.session_state.summary_filename, key="download_md")
-        with col2:
-            if st.button("🔁 Regenerate Summary", key="regenerate_button"):
-                with st.spinner("Re-generating with GPT-4o..."):
-                    run_summary_generation(source_text, current_file_key)
 
 def load_existing_outputs(filename):
     base_name = os.path.splitext(filename)[0]
@@ -209,13 +197,14 @@ def load_existing_outputs(filename):
         st.session_state.summary_filename = os.path.basename(summary_path)
         st.session_state.last_summarized_file = base_name
 
-st.title("MyStudyMate (MVP)")
-st.write("Upload a lecture audio or PDF file")
+st.title("📚 MyStudyMate")
+st.caption("Convert lectures or slides into clear notes and glossaries.")
 
 uploaded_file = st.file_uploader("Choose a file", type=["mp3", "wav", "pdf"])
 
 if uploaded_file is not None:
     st.success(f"Uploaded file: {uploaded_file.name}")
+    st.markdown("---")
     file_extension = uploaded_file.name.split('.')[-1]
     base_name = os.path.splitext(uploaded_file.name)[0]
     load_existing_outputs(uploaded_file.name)
@@ -224,10 +213,10 @@ if uploaded_file is not None:
     with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_extension}") as tmp_file:
         tmp_file.write(uploaded_file.read())
         temp_file_path = tmp_file.name
-    st.info(f"File saved to: {temp_file_path}")
+
     if file_extension in ["mp3", "wav"]:
         if "transcript" not in st.session_state:
-            with st.spinner("Preprocessing audio and transcribing in chunks..."):
+            with st.spinner("Preprocessing audio..."):
                 preprocessed_path = temp_file_path.replace(".mp3", ".wav").replace(".wav", "_temp.wav")
                 preprocess_audio(temp_file_path, preprocessed_path)
             transcript = transcribe_audio_in_chunks(preprocessed_path)
@@ -238,13 +227,8 @@ if uploaded_file is not None:
                 f.write(transcript)
             st.session_state.transcript_path = transcript_path
             st.session_state.transcript_filename = transcript_filename
-        st.subheader("Transcript")
-        st.text_area("Full Transcript", st.session_state.transcript, height=300)
-        with open(st.session_state.transcript_path, "rb") as f:
-            st.download_button("📄 Download Transcript", f, file_name=st.session_state.transcript_filename)
-        source_text = st.session_state.get("transcript") or st.session_state.get("pdf_text")
-        if source_text:
-            display_summary_controls(uploaded_file.name, source_text)
+        current_text = st.session_state.transcript
+        download_label = "📥 Download Extracted Text"
     elif file_extension == "pdf":
         if "pdf_text" not in st.session_state:
             with st.spinner("Extracting text from PDF..."):
@@ -259,10 +243,43 @@ if uploaded_file is not None:
                     f.write(text)
                 st.session_state.pdf_text_path = pdf_text_path
                 st.session_state.pdf_text_filename = pdf_text_filename
-        st.subheader("Extracted Text")
-        st.text_area("Full PDF Text", st.session_state.pdf_text, height=300)
-        with open(st.session_state.pdf_text_path, "rb") as f:
-            st.download_button("📄 Download Extracted Text", f, file_name=st.session_state.pdf_text_filename)
-        source_text = st.session_state.get("transcript") or st.session_state.get("pdf_text")
-        if source_text:
-            display_summary_controls(uploaded_file.name, source_text)
+        current_text = st.session_state.pdf_text
+        download_label = "📥 Download Extracted Text"
+    else:
+        current_text = ""
+        download_label = ""
+
+    st.markdown("## 📝 Extracted Text")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.text_area("", current_text, height=300)
+    with col2:
+        with open(st.session_state.transcript_path, "rb") as f:
+            st.download_button(download_label, f, file_name=st.session_state.transcript_filename)
+
+        current_file_key = os.path.splitext(uploaded_file.name)[0]
+        summary_already_generated = (
+            st.session_state.get("summary_md") and
+            st.session_state.get("last_summarized_file") == current_file_key and
+            st.session_state.get("summary_path") and
+            os.path.exists(st.session_state.get("summary_path"))
+        )
+
+        if summary_already_generated:
+            with open(st.session_state.summary_path, "rb") as f:
+                st.download_button("📄 Download Summary", f, file_name=st.session_state.summary_filename, key="download_summary")
+            if st.button("🔁 Regenerate", key="regenerate_summary"):
+                with st.spinner("Regenerating summary..."):
+                    run_summary_generation(current_text, current_file_key)
+                    st.rerun()
+        else:
+            est_input, est_output, est_cost = estimate_gpt4o_cost(current_text)
+            gen_label = f"✨ Generate Summary\n(est. ${est_cost:.2f})"
+            if st.button(gen_label, key="generate_summary"):
+                with st.spinner("Summarizing with GPT-4o..."):
+                    run_summary_generation(current_text, current_file_key)
+                    st.rerun()
+
+    if st.session_state.get("summary_md"):
+        st.markdown("---")
+        st.markdown(st.session_state.summary_md)
