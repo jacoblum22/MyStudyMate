@@ -9,7 +9,7 @@ from openai import OpenAI
 import tiktoken
 from pydub import AudioSegment
 import shutil
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
 
@@ -100,7 +100,8 @@ def transcribe_audio_in_chunks(audio_path, model_size="tiny.en", chunk_ms=30_000
             status_text.write("Retrying failed chunks serially...")
             for idx, path in failed_chunks:
                 try:
-                    result = model.transcribe(path)
+                    thread_model = whisper.load_model(model_size)
+                    result = thread_model.transcribe(path)
                     transcript_chunks[idx] = result["text"]
                 except Exception:
                     transcript_chunks[idx] = ""
@@ -201,6 +202,41 @@ st.title("📚 MyStudyMate")
 st.caption("Convert lectures or slides into clear notes and glossaries.")
 
 uploaded_file = st.file_uploader("Choose a file", type=["mp3", "wav", "pdf"])
+
+st.markdown("""
+### 👋 Welcome to MyStudyMate
+
+MyStudyMate helps you turn lectures and slides into clean, structured study notes and glossaries—perfect for reviewing, studying, or building flashcards later.
+
+---
+
+### 🛠️ How it works:
+
+1. **Upload your file**  
+   - 🎧 Upload **lecture audio** (`.mp3`, `.wav`)  
+   - 📄 Or upload a **PDF** (slides, textbook pages, etc.)
+
+2. **Wait while it processes**  
+   - Audio is automatically transcribed *(note: transcripts may be rough)*  
+   - PDF text is extracted  
+   - You’ll see the full raw text in a scrollable box
+
+3. **(Optional) Download the text**  
+   - Use the download button to save the raw text if you want  
+   - You don’t need to—it's just for reference
+
+4. **Generate your summary and glossary**  
+   - Click the ✨ button to run GPT-4o  
+   - You’ll get:
+     - Bullet-point **class notes**
+     - A clear **glossary of key terms**
+   - Everything is in Markdown format and downloadable
+
+---
+
+### 💡 Tip:
+The clearer and more complete your input is, the better the summary will be.
+""")
 
 if uploaded_file is not None:
     st.success(f"Uploaded file: {uploaded_file.name}")
