@@ -9,6 +9,9 @@ from openai import OpenAI
 import tiktoken
 from pydub import AudioSegment
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+import threading
+import time
 
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -39,20 +42,71 @@ def preprocess_audio(input_path, output_path):
     audio.export(output_path, format="wav")
 
 def transcribe_audio_in_chunks(audio_path, model_size="tiny.en", chunk_ms=30_000):
-    model = whisper.load_model(model_size)
     audio = AudioSegment.from_file(audio_path)
     duration_ms = len(audio)
-    transcript = ""
 
-    for i in range(0, duration_ms, chunk_ms):
-        chunk = audio[i:i + chunk_ms]
-        chunk_filename = os.path.join(temp_chunks_dir, f"chunk_{i // chunk_ms}.mp3")
+    total_chunks = (duration_ms + chunk_ms - 1) // chunk_ms
+    completed_chunks = 0
+    lock = threading.Lock()
+
+    chunk_paths = []
+    for i in range(total_chunks):
+        start = i * chunk_ms
+        chunk = audio[start:start + chunk_ms]
+        chunk_filename = os.path.join(temp_chunks_dir, f"chunk_{i}.mp3")
         chunk.export(chunk_filename, format="mp3")
-        result = model.transcribe(chunk_filename)
-        transcript += result["text"] + " "
+        chunk_paths.append((i, chunk_filename))
+
+    transcript_chunks = [None] * total_chunks
+    failed_chunks = []
+
+    def transcribe_chunk(idx, chunk_path):
+        nonlocal completed_chunks
+        try:
+            thread_model = whisper.load_model(model_size)
+            result = thread_model.transcribe(chunk_path)
+            with lock:
+                completed_chunks += 1
+            return idx, result["text"]
+        except Exception:
+            with lock:
+                failed_chunks.append((idx, chunk_path))
+            return idx, None
+
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    with ThreadPoolExecutor(max_workers=max(os.cpu_count() // 2, 1)) as executor:
+        futures = {executor.submit(transcribe_chunk, idx, path): idx for idx, path in chunk_paths}
+
+        while completed_chunks < total_chunks:
+            with lock:
+                progress = completed_chunks / total_chunks
+            progress_bar.progress(progress)
+            status_text.write(f"Transcribing chunk {completed_chunks} of {total_chunks}...")
+            time.sleep(0.2)
+
+        for future in as_completed(futures):
+            idx, text = future.result()
+            if text is not None:
+                transcript_chunks[idx] = text
+
+    # Serial retry for failed chunks
+    if failed_chunks:
+        status_text.write("Retrying failed chunks serially...")
+        fallback_model = whisper.load_model(model_size)
+        for idx, path in failed_chunks:
+            try:
+                result = fallback_model.transcribe(path)
+                transcript_chunks[idx] = result["text"]
+            except Exception:
+                transcript_chunks[idx] = ""
 
     shutil.rmtree(temp_chunks_dir, ignore_errors=True)
-    return transcript.strip()
+    status_text.write("✅ Transcription complete.")
+    progress_bar.progress(1.0)
+
+    return " ".join([t or "" for t in transcript_chunks]).strip()
 
 def generate_summary_and_glossary(input_text):
     prompt = (
@@ -116,19 +170,38 @@ def display_summary_controls(uploaded_file_name, source_text):
 
 def load_existing_outputs(filename):
     base_name = os.path.splitext(filename)[0]
+    
     transcript_path = os.path.join(output_dir, f"{base_name}_transcript.txt")
     extracted_path = os.path.join(output_dir, f"{base_name}_extracted.txt")
     summary_path = os.path.join(output_dir, f"{base_name}_summary.md")
+
+    # Clear any previous session state
+    st.session_state.pop("transcript", None)
+    st.session_state.pop("transcript_path", None)
+    st.session_state.pop("transcript_filename", None)
+
+    st.session_state.pop("pdf_text", None)
+    st.session_state.pop("pdf_text_path", None)
+    st.session_state.pop("pdf_text_filename", None)
+
+    st.session_state.pop("summary_md", None)
+    st.session_state.pop("summary_path", None)
+    st.session_state.pop("summary_filename", None)
+    st.session_state.pop("last_summarized_file", None)
+
+    # Load new ones if they exist
     if os.path.exists(transcript_path):
         with open(transcript_path, "r", encoding="utf-8") as f:
             st.session_state.transcript = f.read()
         st.session_state.transcript_path = transcript_path
         st.session_state.transcript_filename = os.path.basename(transcript_path)
+
     if os.path.exists(extracted_path):
         with open(extracted_path, "r", encoding="utf-8") as f:
             st.session_state.pdf_text = f.read()
         st.session_state.pdf_text_path = extracted_path
         st.session_state.pdf_text_filename = os.path.basename(extracted_path)
+
     if os.path.exists(summary_path):
         with open(summary_path, "r", encoding="utf-8") as f:
             st.session_state.summary_md = f.read()
@@ -157,14 +230,14 @@ if uploaded_file is not None:
             with st.spinner("Preprocessing audio and transcribing in chunks..."):
                 preprocessed_path = temp_file_path.replace(".mp3", ".wav").replace(".wav", "_temp.wav")
                 preprocess_audio(temp_file_path, preprocessed_path)
-                transcript = transcribe_audio_in_chunks(preprocessed_path, model_size="tiny.en")
-                st.session_state.transcript = transcript
-                transcript_filename = f"{base_name}_transcript.txt"
-                transcript_path = os.path.join(output_dir, transcript_filename)
-                with open(transcript_path, "w", encoding="utf-8") as f:
-                    f.write(transcript)
-                st.session_state.transcript_path = transcript_path
-                st.session_state.transcript_filename = transcript_filename
+            transcript = transcribe_audio_in_chunks(preprocessed_path)
+            st.session_state.transcript = transcript
+            transcript_filename = f"{base_name}_transcript.txt"
+            transcript_path = os.path.join(output_dir, transcript_filename)
+            with open(transcript_path, "w", encoding="utf-8") as f:
+                f.write(transcript)
+            st.session_state.transcript_path = transcript_path
+            st.session_state.transcript_filename = transcript_filename
         st.subheader("Transcript")
         st.text_area("Full Transcript", st.session_state.transcript, height=300)
         with open(st.session_state.transcript_path, "rb") as f:
